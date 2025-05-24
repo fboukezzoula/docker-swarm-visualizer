@@ -1,4 +1,225 @@
-// How to use:
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"path/filepath"
+	// Add these for Azure authentication
+	"github.com/Azure/azure-sdk-for-go/azidentity"
+	"github.com/Azure/azure-sdk-for-go/azservicebus/rest"
+)
+
+var (
+	loggedIn bool
+	currentSubID string
+)
+
+// Authenticate with Azure using service principal
+func authenticate() error {
+	appID := os.Getenv("AZURE_APP_ID")
+	clientSecret := os.Getenv("AZURE_CLIENT_SECRET")
+	tenantID := os.Getenv("AZURE_TENANT_ID")
+
+	if appID == "" || clientSecret == "" || tenantID == "" {
+		return fmt.Errorf("required environment variables (AZURE_APP_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID) are not set")
+	}
+
+	// Create credentials using the service principal
+	creds, err := azidentity.NewServicePrincipalLogin(appID, clientSecret, tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to create service principal credentials: %w", err)
+	}
+
+	loggedIn = true
+	currentSubID = os.Getenv("AZURE_SUBSCRIPTION") // Get initial subscription from env
+
+	fmt.Println("Authenticated successfully with Azure!")
+	return nil
+}
+
+// SetSubscription sets the active Azure subscription
+func setSubscription(subscriptionID string) error {
+	if !loggedIn {
+		return fmt.Errorf("not authenticated - cannot set subscription")
+	}
+
+	// Check if the subscription exists first
+	_, err := rest.NewSubscriptionsClient(rest.PublicCloud, azidentity.Default())
+	if err != nil {
+		return fmt.Errorf("failed to create subscriptions client: %w", err)
+	}
+
+	fmt.Printf("Setting active subscription to: %s\n", subscriptionID)
+	currentSubID = subscriptionID
+	return nil
+}
+
+// GetSubscription returns the currently set subscription ID
+func getSubscription() (string, error) {
+	if !loggedIn {
+		return "", fmt.Errorf("not authenticated - no subscription is set")
+	}
+
+	return currentSubID, nil
+}
+
+// ExecuteAzAksCommand executes an Azure AKS command with file attachments
+func executeAzAksCommand(command string, resourceGroup, aksName string, files []string) error {
+	// Build the az aks command with multiple --file parameters
+	var fileParams strings.Builder
+	for _, file := range files {
+		fileParams.WriteString(" --file \"")
+		fileParams.WriteString(file)
+		fileParams.WriteString("\"")
+	}
+
+	// Include subscription ID in the command
+	fullCommand := fmt.Sprintf("az aks command invoke %s --resource-group %s --name %s %s", 
+		command, resourceGroup, aksName, fileParams.String())
+	
+	fmt.Println("Executing:", fullCommand)
+
+	// Execute the command using os/exec
+	cmd := exec.Command("bash", "-c", fullCommand)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("Error executing command: %v\nOutput:\n%s", err, string(output))
+		return fmt.Errorf("command failed: %w", err)
+	}
+
+	// Print the output
+	fmt.Println(string(output))
+
+	return nil
+}
+
+func main() {
+	// Set default values from environment variables
+	resourceGroup := os.Getenv("RESOURCEGROUP")
+	aksName := os.Getenv("AKSNAME")
+
+	if resourceGroup == "" || aksName == "" {
+		fmt.Println("Warning: RESOURCEGROUP and AKSNAME environment variables not set.")
+		fmt.Println("Using empty values, which will likely result in errors.")
+	}
+
+	// Authenticate with Azure
+	if err := authenticate(); err != nil {
+		log.Fatalf("Authentication failed: %v", err)
+	}
+
+	// Set default subscription if not already set
+	subscriptionID := os.Getenv("AZURE_SUBSCRIPTION")
+	if subscriptionID != "" {
+		if err := setSubscription(subscriptionID); err != nil {
+			log.Fatalf("Failed to set default subscription: %v", err)
+		}
+		fmt.Printf("Set active subscription to: %s\n", subscriptionID)
+	} else {
+		// Prompt user to select a subscription if not set
+		subscriptionID, err := getSubscription()
+		if err != nil {
+			log.Fatalf("Failed to retrieve current subscription: %v", err)
+		}
+		fmt.Printf("Using current subscription: %s\n", subscriptionID)
+	}
+
+	// Print current status
+	subID, err := getSubscription()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Current Status:\n  Logged In: %v\n  Subscription ID: %s\n", loggedIn, subID)
+
+	// Define the CLI command
+	cmd := &cobra.Command{
+		Use:   "xks",
+		Short: "CLI for managing Azure Kubernetes Services (AKS)",
+		Long:  "Convert xks commands to az aks and execute them.",
+	}
+
+	// Create a sub-command for invoking AKS operations
+	invokeCmd := &cobra.Command{
+		Use:   "invoke [command]",
+		Short: "Invoke an Azure Kubernetes Service operation",
+		Long:  "Converts xks invoke to az aks and executes the resulting command.",
+		Args:  cobra.MinimumNArgs(1), // Require at least one argument (the command)
+	}
+
+	// Add positional arguments for the command
+	invokeCmd.AddArgument("command", "The AKS operation to perform")
+
+	// Set flags with default values from environment variables
+	invokeCmd.Flags().String("resource-group", resourceGroup, "Azure resource group")
+	invokeCmd.Flags().String("name", aksName, "AKS cluster name")
+    // Add flag for optional subscription override
+    invokeCmd.Flags().StringP("subscription", "s", "", "Override the active Azure subscription")
+
+	// Set pre-execute hook to handle command conversion and execution
+	invokeCmd.PreExecute = func(cmd *cobra.Command, args []string) error {
+		resourceGroup := cmd.Flags().GetString("resource-group")
+		aksName := cmd.Flags().GetString("name")
+		commandToExecute := strings.Join(args, " ")
+        subscriptionOverride := cmd.Flags().GetString("subscription")
+
+		// Use overridden subscription if provided
+		if subscriptionOverride != "" {
+			if err := setSubscription(subscriptionOverride); err != nil {
+				return fmt.Errorf("failed to set subscription: %w", err)
+			}
+		}
+
+		// Discover all files in the current directory
+		files, err := discoverFiles(".")
+		if err != nil {
+			return fmt.Errorf("failed to discover files: %w", err)
+		}
+
+		// Execute the converted command with file attachments
+		return executeAzAksCommand(commandToExecute, resourceGroup, aksName, files)
+	}
+
+	// Add the sub-command to the main command
+	cmd.AddCommand(invokeCmd)
+
+	// Execute the CLI
+	if err := cmd.Execute(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// discoverFiles discovers all files in a directory (excluding hidden files)
+func discoverFiles(dir string) ([]string, error) {
+	var files []string
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		// Exclude directories
+		if !entry.IsDir() {
+			files = append(files, filepath.Join(dir, entry.Name()))
+		}
+	}
+
+	return files, nil
+}
+
+
+
+
+
+
+
+
+
+
+
+
+***********************************************************************// How to use:
 
 // Save the code as main.go
 // Run go mod init xks-cli (or your preferred module name)
