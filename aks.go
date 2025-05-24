@@ -4,6 +4,170 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// Global variables to store credentials and state
+var (
+	appID         string
+	clientSecret  string
+	tenantID      string
+	loggedIn      bool // Flag to track login status
+	subscriptionID string
+	resourceGroup string
+	aksName       string
+)
+
+// loadCredentials loads authentication credentials from environment variables
+func loadCredentials() error {
+	appID = os.Getenv("AZURE_APP_ID")
+	clientSecret = os.Getenv("AZURE_CLIENT_SECRET")
+	tenantID = os.Getenv("AZURE_TENANT_ID")
+
+	if appID == "" || clientSecret == "" || tenantID == "" {
+		return fmt.Errorf("missing required environment variables: AZURE_APP_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID")
+	}
+
+	fmt.Println("Loaded credentials from environment variables")
+	return nil
+}
+
+// authenticate logs in to Azure using service principal
+func authenticate() error {
+	if err := loadCredentials(); err != nil {
+		return fmt.Errorf("failed to load credentials: %w", err)
+	}
+
+	fmt.Println("Authenticating...")
+	cmd := exec.Command("az", "login", "--service-principal", "-i")
+	cmd.Env = append(os.Environ(),
+		"AZURE_APP_ID="+appID,
+		"AZURE_CLIENT_SECRET="+clientSecret,
+		"AZURE_TENANT_ID="+tenantID)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("authentication failed: %w\nOutput:\n%s", err, string(output))
+	}
+
+	fmt.Println("Authenticated successfully!")
+	loggedIn = true
+	return nil
+}
+
+// getSubscriptionID retrieves the current Azure subscription ID
+func getSubscriptionID() (string, error) {
+	cmd := exec.Command("az", "account", "show")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to get subscription ID: %w\nOutput:\n%s", err, string(output))
+	}
+
+	// Parse the output to extract the subscription ID
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "id:") {
+			subID := strings.TrimSpace(strings.Split(line, ":")[1])
+			return subID, nil
+		}
+	}
+
+	return "", fmt.Errorf("unable to extract subscription ID from output")
+}
+
+// setSubscription sets the active Azure subscription
+func setSubscription(subscriptionID string) error {
+	cmd := exec.Command("az", "account", "set", "--subscription", subscriptionID)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to set subscription: %w\nOutput:\n%s", err, string(output))
+	}
+
+	fmt.Printf("Set active subscription to: %s\n", subscriptionID)
+	this.subscriptionID = subID
+	return nil
+}
+
+// discoverFiles finds all files in a directory (excluding the directory itself)
+func discoverFiles(dirPath string) ([]string, error) {
+	files := []string{}
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && path != dirPath+string(os.PathSeparator) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover files: %w", err)
+	}
+	return files, nil
+}
+
+func main() {
+	// Check if required environment variables are set
+	if os.Getenv("AZURE_APP_ID") == "" || os.Getenv("AZURE_CLIENT_SECRET") == "" || os.Getenv("AZURE_TENANT_ID") == "" {
+		fmt.Println("Error: Required environment variables (AZURE_APP_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID) are not set.")
+		os.Exit(1)
+	}
+
+	// Authenticate with Azure
+	if err := authenticate(); err != nil {
+		log.Fatalf("Authentication failed: %v", err)
+	}
+
+	// Set a default subscription (or prompt the user to select one)
+	defaultSubID := os.Getenv("AZURE_SUBSCRIPTION")
+	if defaultSubID == "" {
+		fmt.Println("No default subscription set in environment variables.")
+		subID, err := getSubscriptionID()
+		if err != nil {
+			log.Fatalf("Failed to retrieve current subscription: %v", err)
+		}
+		fmt.Printf("Using current subscription: %s\n", subID)
+	} else {
+		if err := setSubscription(defaultSubID); err != nil {
+			log.Fatalf("Failed to set default subscription: %v", err)
+		}
+		fmt.Printf("Set active subscription to: %s\n", defaultSubID)
+	}
+
+	// Print current status
+	subID, err := getSubscriptionID()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Current Status:\n  Logged In: %v\n  Subscription ID: %s\n", loggedIn, subID)
+
+	// Example usage - list AKS clusters in the current subscription
+	cmd := exec.Command("az", "aks", "list")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Fatalf("Failed to list AKS clusters: %v\nOutput:\n%s", err, string(output))
+	}
+
+	fmt.Println("\nAKS Clusters in your subscription:")
+	fmt.Println(string(output))
+}
+
+
+
+
+
+
+*****************************************************
+
+
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
 	"strings"
 	"path/filepath"
 	// Add these for Azure authentication
