@@ -1,3 +1,4 @@
+```
 # Quick debug test on ONE subscription
 az graph query -q "
 resources
@@ -5,3 +6,4 @@ resources
 | project id, name, type, properties
 | limit 10
 " --subscriptions "YOUR-SUB-ID" -o json | jq '.[].type' | sort -u
+```
